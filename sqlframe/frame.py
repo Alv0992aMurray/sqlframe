@@ -1,81 +1,99 @@
-"""SqlFrame – a lazy SQL-backed DataFrame-like object."""
+"""Core SqlFrame class — lazy SQL builder with pandas-compatible surface."""
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Union
 
 import pandas as pd
 
-from sqlframe.connection import Connection
-
 
 class SqlFrame:
-    """Represents a SQL query that can be refined before execution.
+    """Lazy wrapper around a SQL query that mimics a pandas DataFrame API."""
 
-    Instances are created via :func:`sqlframe.read_table` or
-    :meth:`Connection.query`; they are *not* meant to be constructed directly.
-    """
-
-    def __init__(self, connection: Connection, sql: str) -> None:
-        self._conn = connection
-        self._sql = sql
-        self._limit: Optional[int] = None
-        self._where: Optional[str] = None
-        self._columns: Optional[List[str]] = None
+    def __init__(self, conn, table: str, sql: Optional[str] = None) -> None:
+        self._conn = conn
+        self._table = table
+        self._sql = sql  # overrides table when set
+        self._columns: List[str] = ["*"]
+        self._filters: List[str] = []
+        self._limit_val: Optional[int] = None
 
     # ------------------------------------------------------------------
-    # Chainable transformations (return new SqlFrame)
+    # Internal SQL builder
+    # ------------------------------------------------------------------
+
+    def _build_sql(self) -> str:
+        select_clause = ", ".join(self._columns)
+        source = f"({self._sql}) _sub" if self._sql else self._table
+        sql = f"SELECT {select_clause} FROM {source}"
+        if self._filters:
+            where_clause = " AND ".join(f"({f})" for f in self._filters)
+            sql += f" WHERE {where_clause}"
+        if self._limit_val is not None:
+            sql += f" LIMIT {self._limit_val}"
+        return sql
+
+    def _clone(self) -> "SqlFrame":
+        clone = SqlFrame(self._conn, self._table, self._sql)
+        clone._columns = list(self._columns)
+        clone._filters = list(self._filters)
+        clone._limit_val = self._limit_val
+        return clone
+
+    # ------------------------------------------------------------------
+    # Transformation API
     # ------------------------------------------------------------------
 
     def select(self, *columns: str) -> "SqlFrame":
-        """Project specific columns."""
         clone = self._clone()
         clone._columns = list(columns)
         return clone
 
     def where(self, condition: str) -> "SqlFrame":
-        """Append a WHERE / AND clause."""
         clone = self._clone()
-        clone._where = condition
+        clone._filters.append(condition)
         return clone
 
     def limit(self, n: int) -> "SqlFrame":
-        """Restrict the number of rows returned."""
         clone = self._clone()
-        clone._limit = n
+        clone._limit_val = n
         return clone
 
     # ------------------------------------------------------------------
-    # Terminal actions
+    # Aggregation API
+    # ------------------------------------------------------------------
+
+    def group_by(self, *columns: str) -> "_GroupByProxy":
+        """Return a proxy that accepts .agg() to build an AggFrame."""
+        return _GroupByProxy(self, list(columns))
+
+    # ------------------------------------------------------------------
+    # Execution
     # ------------------------------------------------------------------
 
     def to_pandas(self) -> pd.DataFrame:
-        """Execute the query and return a :class:`pandas.DataFrame`."""
         return self._conn.query(self._build_sql())
 
-    def show(self, n: int = 20) -> None:  # pragma: no cover
-        """Print the first *n* rows to stdout."""
-        print(self.limit(n).to_pandas().to_string(index=False))
+    def head(self, n: int = 5) -> pd.DataFrame:
+        return self.limit(n).to_pandas()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _build_sql(self) -> str:
-        cols = ", ".join(self._columns) if self._columns else "*"
-        sql = f"SELECT {cols} FROM ({self._sql}) AS _sf_subquery"
-        if self._where:
-            sql += f" WHERE {self._where}"
-        if self._limit is not None:
-            sql += f" LIMIT {self._limit}"
-        return sql
-
-    def _clone(self) -> "SqlFrame":
-        clone = SqlFrame(self._conn, self._sql)
-        clone._limit = self._limit
-        clone._where = self._where
-        clone._columns = list(self._columns) if self._columns else None
-        return clone
+    def count(self) -> int:
+        sql = f"SELECT COUNT(*) AS _cnt FROM ({self._build_sql()}) _count_sub"
+        result = self._conn.query(sql)
+        return int(result.iloc[0, 0])
 
     def __repr__(self) -> str:  # pragma: no cover
-        return f"SqlFrame(sql={self._build_sql()!r})"
+        return f"SqlFrame(table={self._table!r}, sql={self._build_sql()!r})"
+
+
+class _GroupByProxy:
+    """Intermediate object returned by SqlFrame.group_by()."""
+
+    def __init__(self, parent: SqlFrame, group_by: List[str]) -> None:
+        self._parent = parent
+        self._group_by = group_by
+
+    def agg(self, **kwargs: str) -> "sqlframe.aggregations.AggFrame":  # type: ignore[name-defined]
+        from sqlframe.aggregations import AggFrame
+
+        return AggFrame(self._parent, self._group_by, kwargs)
