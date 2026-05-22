@@ -51,6 +51,26 @@ class UnionFrame:
         """Execute the union query and return a DataFrame."""
         return self._conn.query(self._build_sql())
 
+    def count(self) -> int:
+        """Return the number of rows in the union result.
+
+        Wraps the union SQL in a COUNT query so that only a single
+        aggregate row is fetched rather than the full result set.
+        """
+        keyword = "UNION ALL" if self._union_all else "UNION"
+        parts = []
+        for frame in self._frames:
+            if hasattr(frame, "_build_sql"):
+                parts.append(f"({frame._build_sql()})")
+            else:
+                raise TypeError(f"Cannot union object of type {type(frame)}")
+        union_sql = f" {keyword} ".join(parts)
+        count_sql = f"SELECT COUNT(*) AS _count FROM ({union_sql}) AS _union_result"
+        if self._where_clause:
+            count_sql += f" WHERE {self._where_clause}"
+        result = self._conn.query(count_sql)
+        return int(result["_count"].iloc[0])
+
     def _clone(self) -> "UnionFrame":
         clone = UnionFrame(self._frames, self._conn, self._union_all)
         clone._where_clause = self._where_clause
