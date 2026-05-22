@@ -1,97 +1,98 @@
-"""Core SqlFrame – wraps a lazily-built SELECT statement."""
+"""Core SqlFrame class — wraps a lazy SQL query and exposes a pandas-like API."""
 from __future__ import annotations
-from typing import List, Optional
 
+from typing import List, Optional, Union
+
+from sqlframe.frame_cache_mixin import CacheMixin
+from sqlframe.frame_explain_mixin import ExplainMixin
+from sqlframe.frame_export_mixin import ExportMixin
+from sqlframe.frame_pivot_mixin import PivotMixin
 from sqlframe.frame_window_mixin import WindowMixin
 
 
-class SqlFrame(WindowMixin):
-    """Lazy representation of a SQL SELECT query."""
+class SqlFrame(CacheMixin, ExplainMixin, ExportMixin, PivotMixin, WindowMixin):
+    """Lazy SQL-backed frame."""
 
-    def __init__(self, conn, table: str) -> None:
+    def __init__(
+        self,
+        conn,
+        table: str,
+        columns: str = "*",
+        where_clause: Optional[str] = None,
+        order_clause: Optional[str] = None,
+        limit_val: Optional[int] = None,
+        params: Optional[list] = None,
+    ):
         self._conn = conn
         self._table = table
-        self._columns: List[str] = ["*"]
-        self._where_clauses: List[str] = []
-        self._order_cols: List[str] = []
-        self._limit_val: Optional[int] = None
+        self._columns = columns
+        self._where = where_clause
+        self._order = order_clause
+        self._limit = limit_val
+        self._params = params or []
 
-    # ------------------------------------------------------------------ #
-    # Builder methods                                                       #
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------
+    # Query builders
+    # ------------------------------------------------------------------
 
     def select(self, *columns: str) -> "SqlFrame":
-        self._columns = list(columns)
-        return self
+        return SqlFrame(
+            self._conn, self._table, ", ".join(columns),
+            self._where, self._order, self._limit, self._params,
+        )
 
-    def where(self, condition: str) -> "SqlFrame":
-        self._where_clauses.append(condition)
-        return self
+    def where(self, condition: str, params: Optional[list] = None) -> "SqlFrame":
+        extra = params or []
+        new_params = self._params + extra
+        clause = f"({self._where}) AND ({condition})" if self._where else condition
+        return SqlFrame(
+            self._conn, self._table, self._columns,
+            clause, self._order, self._limit, new_params,
+        )
 
     def order_by(self, *columns: str) -> "SqlFrame":
-        self._order_cols = list(columns)
-        return self
+        return SqlFrame(
+            self._conn, self._table, self._columns,
+            self._where, ", ".join(columns), self._limit, self._params,
+        )
 
     def limit(self, n: int) -> "SqlFrame":
-        self._limit_val = n
-        return self
-
-    def join(
-        self,
-        other: "SqlFrame",
-        on: str,
-        how: str = "inner",
-    ):
-        from sqlframe.joins import JoinFrame
-
-        return JoinFrame(
-            conn=self._conn,
-            left_sql=self._build_sql(),
-            right_sql=other._build_sql(),
-            on=on,
-            how=how,
+        return SqlFrame(
+            self._conn, self._table, self._columns,
+            self._where, self._order, n, self._params,
         )
+
+    # ------------------------------------------------------------------
+    # SQL generation
+    # ------------------------------------------------------------------
+
+    def _build_sql(self) -> str:
+        sql = f"SELECT {self._columns} FROM {self._table}"
+        if self._where:
+            sql += f" WHERE {self._where}"
+        if self._order:
+            sql += f" ORDER BY {self._order}"
+        if self._limit is not None:
+            sql += f" LIMIT {self._limit}"
+        return sql
+
+    # ------------------------------------------------------------------
+    # Aggregations
+    # ------------------------------------------------------------------
 
     def groupby(self, *columns: str):
         from sqlframe.aggregations import AggFrame
+        return AggFrame(self._conn, self._table, list(columns), self._where, self._params)
 
-        return AggFrame(
-            conn=self._conn,
-            base_sql=self._build_sql(),
-            group_cols=list(columns),
-        )
+    def agg(self, **kwargs):
+        return self.groupby().agg(**kwargs)
 
-    # ------------------------------------------------------------------ #
-    # SQL construction                                                      #
-    # ------------------------------------------------------------------ #
-
-    def _build_sql(self) -> str:
-        cols = ", ".join(self._columns)
-        sql = f"SELECT {cols} FROM {self._table}"
-        if self._where_clauses:
-            sql += " WHERE " + " AND ".join(
-                f"({c})" for c in self._where_clauses
-            )
-        if self._order_cols:
-            sql += " ORDER BY " + ", ".join(self._order_cols)
-        if self._limit_val is not None:
-            sql += f" LIMIT {self._limit_val}"
-        return sql
-
-    # ------------------------------------------------------------------ #
-    # Execution                                                             #
-    # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------
+    # Materialisation
+    # ------------------------------------------------------------------
 
     def to_pandas(self):
-        return self._conn.query(self._build_sql())
+        return self._conn.query(self._build_sql(), params=self._params)
 
-    def count(self) -> int:
-        sql = f"SELECT COUNT(*) AS n FROM ({self._build_sql()}) AS _c"
-        df = self._conn.query(sql)
-        return int(df.iloc[0, 0])
-
-    def head(self, n: int = 5):
-        return self.limit(n).to_pandas()
-
-    def __repr__(self) -> str:  # pragma: no cover
-        return f"SqlFrame(sql={self._build_sql()!r})"
+    def __repr__(self) -> str:
+        return f"<SqlFrame sql={self._build_sql()!r}>"
