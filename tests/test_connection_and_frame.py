@@ -90,3 +90,11 @@ def test_sqlframe_immutable_chaining(conn):
     _ = base.limit(1)
     df = base.to_pandas()
     assert len(df) == 4  # original unchanged
+
+
+def test_sqlframe_where_no_results(conn):
+    """A where clause matching no rows should return an empty DataFrame."""
+    df = read_table(conn, "sales").where("amount > 9999").to_pandas()
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 0
+    assert list(df.columns) == ["id", "product", "amount"]
