@@ -1,28 +1,31 @@
-"""sqlframe – pandas-to-SQL patterns for live database exploration."""
+"""sqlframe — pandas-to-SQL exploratory data analysis toolkit."""
+from __future__ import annotations
+from typing import Optional
 
 from sqlframe.connection import Connection
 from sqlframe.frame import SqlFrame
 
-__all__ = ["Connection", "SqlFrame", "read_table"]
-__version__ = "0.1.0"
 
+def read_table(
+    table: str,
+    *,
+    conn: Optional[Connection] = None,
+    url: Optional[str] = None,
+) -> SqlFrame:
+    """Return a lazy :class:`SqlFrame` pointing at *table*.
 
-def read_table(connection: Connection, table: str) -> SqlFrame:
-    """Return a :class:`SqlFrame` backed by *table*.
+    Provide either an existing *conn* or a connection *url*; if both are given
+    *conn* takes precedence.
 
-    Parameters
-    ----------
-    connection:
-        An active :class:`~sqlframe.connection.Connection`.
-    table:
-        Fully-qualified table name (e.g. ``"public.orders"`` or just
-        ``"orders"``).
+    Example::
 
-    Examples
-    --------
-    >>> conn = Connection.from_url("sqlite:///sales.db")
-    >>> df = read_table(conn, "orders").where("amount > 100").limit(50)
-    >>> df.to_pandas()
+        import sqlframe
+        df = sqlframe.read_table("orders", url="postgresql://user:pass@host/db")
+        df.schema()          # inspect columns
+        df.limit(5).to_pandas()
     """
-    sql = f"SELECT * FROM {table}"
-    return SqlFrame(connection, sql)
+    if conn is None and url is None:
+        raise ValueError("Provide either 'conn' or 'url'.")
+    if conn is None:
+        conn = Connection.from_url(url)
+    return SqlFrame(table=table, conn=conn)
