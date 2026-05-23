@@ -1,6 +1,3 @@
-"""Tests for HeadFrame and the head() mixin method."""
-from __future__ import annotations
-
 import pandas as pd
 import pytest
 
@@ -8,19 +5,37 @@ from sqlframe.head import HeadFrame
 
 
 # ---------------------------------------------------------------------------
-# Minimal fake connection
+# Minimal fakes
 # ---------------------------------------------------------------------------
 
 class FakeConn:
-    def __init__(self):
-        self.last_sql: str = ""
-        self.last_params: list = []
-        self._result = pd.DataFrame({"id": [1, 2, 3], "val": ["a", "b", "c"]})
+    """Records the last SQL string passed to .query()."""
 
-    def query(self, sql: str, params=None) -> pd.DataFrame:
+    def __init__(self):
+        self.last_sql = None
+        self.last_params = None
+
+    def query(self, sql: str, params=None):
         self.last_sql = sql
-        self.last_params = params or []
-        return self._result
+        self.last_params = params
+        return pd.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"]})
+
+
+class FakeFrame:
+    """Minimal stand-in for SqlFrame."""
+
+    def __init__(self, conn, table="orders", columns=None, where_clauses=None):
+        self._conn = conn
+        self._table = table
+        self._columns = columns or ["*"]
+        self._where_clauses = where_clauses or []
+
+    def _build_sql(self):
+        cols = ", ".join(self._columns)
+        sql = f"SELECT {cols} FROM {self._table}"
+        if self._where_clauses:
+            sql += " WHERE " + " AND ".join(self._where_clauses)
+        return sql
 
 
 # ---------------------------------------------------------------------------
@@ -34,34 +49,33 @@ def fake_conn():
 
 @pytest.fixture
 def head_frame(fake_conn):
-    return HeadFrame(
-        conn=fake_conn,
-        source_sql="SELECT * FROM orders",
-        n=5,
-    )
+    frame = FakeFrame(fake_conn)
+    return HeadFrame(frame=frame, n=3)
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# HeadFrame._build_sql
 # ---------------------------------------------------------------------------
 
-def test_build_sql_default_limit(head_frame):
+def test_build_sql_contains_limit(head_frame):
     sql = head_frame._build_sql()
-    assert "LIMIT 5" in sql
+    assert "LIMIT 3" in sql
+
+
+def test_build_sql_wraps_base_query(head_frame):
+    sql = head_frame._build_sql()
     assert "SELECT * FROM orders" in sql
 
 
-def test_build_sql_custom_limit(fake_conn):
-    hf = HeadFrame(conn=fake_conn, source_sql="SELECT * FROM sales", n=10)
-    assert "LIMIT 10" in hf._build_sql()
+def test_build_sql_default_n(fake_conn):
+    frame = FakeFrame(fake_conn)
+    hf = HeadFrame(frame=frame, n=5)
+    assert "LIMIT 5" in hf._build_sql()
 
 
-def test_build_sql_wraps_in_subquery(head_frame):
-    sql = head_frame._build_sql()
-    # The original query must appear inside a subquery
-    assert sql.startswith("SELECT * FROM (")
-    assert "_head_subq" in sql
-
+# ---------------------------------------------------------------------------
+# HeadFrame.to_pandas
+# ---------------------------------------------------------------------------
 
 def test_to_pandas_returns_dataframe(head_frame, fake_conn):
     result = head_frame.to_pandas()
@@ -70,28 +84,55 @@ def test_to_pandas_returns_dataframe(head_frame, fake_conn):
 
 def test_to_pandas_executes_correct_sql(head_frame, fake_conn):
     head_frame.to_pandas()
-    assert "LIMIT 5" in fake_conn.last_sql
+    assert fake_conn.last_sql is not None
+    assert "LIMIT 3" in fake_conn.last_sql
 
 
-def test_source_sql_trailing_semicolon_stripped(fake_conn):
-    hf = HeadFrame(conn=fake_conn, source_sql="SELECT 1;", n=3)
-    sql = hf._build_sql()
-    # Should not have double semicolons or malformed subquery
-    assert ";;" not in sql
-    assert "SELECT 1" in sql
+# ---------------------------------------------------------------------------
+# HeadMixin.head
+# ---------------------------------------------------------------------------
+
+def test_head_mixin_returns_head_frame(fake_conn):
+    from sqlframe.frame_head_mixin import HeadMixin
+
+    class MixedFrame(HeadMixin, FakeFrame):
+        pass
+
+    mf = MixedFrame(fake_conn)
+    result = mf.head(7)
+    assert isinstance(result, HeadFrame)
+    assert result._n == 7
 
 
-def test_params_forwarded_to_connection(fake_conn):
-    hf = HeadFrame(
-        conn=fake_conn,
-        source_sql="SELECT * FROM t WHERE region = %s",
-        n=5,
-        params=["west"],
-    )
-    hf.to_pandas()
-    assert fake_conn.last_params == ["west"]
+def test_head_mixin_default_n(fake_conn):
+    from sqlframe.frame_head_mixin import HeadMixin
+
+    class MixedFrame(HeadMixin, FakeFrame):
+        pass
+
+    mf = MixedFrame(fake_conn)
+    result = mf.head()
+    assert result._n == 5
 
 
-def test_default_n_is_five(fake_conn):
-    hf = HeadFrame(conn=fake_conn, source_sql="SELECT * FROM t")
-    assert hf._n == 5
+def test_head_mixin_invalid_n_raises(fake_conn):
+    from sqlframe.frame_head_mixin import HeadMixin
+
+    class MixedFrame(HeadMixin, FakeFrame):
+        pass
+
+    mf = MixedFrame(fake_conn)
+    with pytest.raises(ValueError):
+        mf.head(0)
+
+    with pytest.raises(ValueError):
+        mf.head(-3)
+
+
+# ---------------------------------------------------------------------------
+# __repr__
+# ---------------------------------------------------------------------------
+
+def test_repr_contains_n(head_frame):
+    r = repr(head_frame)
+    assert "3" in r
