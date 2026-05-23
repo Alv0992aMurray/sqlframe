@@ -49,6 +49,11 @@ class DescribeFrame:
                 agg_exprs.append(f"{expr} AS {alias}")
 
             for p in self._percentiles:
+                if not (0.0 <= p <= 1.0):
+                    raise ValueError(
+                        f"Percentile value {p!r} is out of range; "
+                        "each percentile must be between 0.0 and 1.0 inclusive."
+                    )
                 pct_label = str(p).replace(".", "_")
                 expr = f"PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {col})"
                 alias = f"pct{pct_label}__{col}"
